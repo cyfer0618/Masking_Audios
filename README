@@ -1,0 +1,9 @@
+## README ##
+pip install pydub
+pip install ffmpeg
+
+pip install hydra-core processing alignment
+git clone https://github.com/NVIDIA/NeMo-Aligner
+cd NeMo-Aligner
+
+pip install -U "transformers>=4.51.0" accelerate torch

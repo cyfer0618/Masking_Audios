@@ -11,7 +11,7 @@ For the requested language:
 4) force the hybrid model to the CTC decoder;
 5) return word-level timestamps.
 
-Supported: hi, ta, bn, te, kn, ml, gu.
+Supported: hi, ta, bn, te, kn, ml, gu, mr, or, pa, as
 """
 
 from __future__ import annotations
@@ -32,6 +32,22 @@ MODEL_CONFIG: Dict[str, Dict[str, str]] = {
     "hi": {
         "repo_id": "ai4bharat/indicconformer_stt_hi_hybrid_ctc_rnnt_large",
         "filename": "indicconformer_stt_hi_hybrid_rnnt_large.nemo",
+    },
+    "or": {
+        "repo_id": "ai4bharat/indicconformer_stt_or_hybrid_ctc_rnnt_large",
+        "filename": "indicconformer_stt_or_hybrid_rnnt_large.nemo",
+    },
+    "mr": {
+        "repo_id": "ai4bharat/indicconformer_stt_mr_hybrid_ctc_rnnt_large",
+        "filename": "indicconformer_stt_mr_hybrid_rnnt_large.nemo",
+    },
+    "pa": {
+        "repo_id": "ai4bharat/indicconformer_stt_pa_hybrid_ctc_rnnt_large",
+        "filename": "indicconformer_stt_pa_hybrid_rnnt_large.nemo",
+    },
+    "as": {
+        "repo_id": "ai4bharat/indicconformer_stt_as_hybrid_ctc_rnnt_large",
+        "filename": "indicconformer_stt_as_hybrid_rnnt_large.nemo",
     },
     "ta": {
         "repo_id": "ai4bharat/indicconformer_stt_ta_hybrid_ctc_rnnt_large",
@@ -271,8 +287,10 @@ def load_asr_model(
     model.freeze()
     model = model.to(device)
 
-    # Required for timestamp extraction from the hybrid model.
+    # This NeMo branch rejects transcribe(..., timestamps=True). Word times
+    # come from the CTC decoder as frame offsets on Hypothesis.timestep.
     model.cur_decoder = "ctc"
+    model.ctc_decoding.compute_timestamps = True
 
     setattr(model, "_pw_nemo_path", str(nemo_path))
     setattr(model, "_pw_downloaded_now", downloaded_now)
@@ -281,6 +299,22 @@ def load_asr_model(
     MODEL_CACHE[key] = model
     logging.info("CTC model ready on %s", device)
     return model
+
+
+def _frame_stride_seconds(model) -> float:
+    """Seconds per CTC frame: preprocessor hop times encoder subsampling."""
+    window_stride = float(model.cfg.preprocessor.window_stride)
+    factor = int(model.cfg.encoder.subsampling_factor)
+    return window_stride * factor
+
+
+def _word_timestamp(item: Dict[str, Any], stride: float) -> Dict[str, Any]:
+    if "start" in item and "end" in item:
+        start, end = float(item["start"]), float(item["end"])
+    else:
+        start = float(item["start_offset"]) * stride
+        end = float(item["end_offset"]) * stride
+    return {"word": str(item["word"]).strip(), "start": start, "end": end}
 
 
 def transcribe_with_timestamps(
@@ -303,28 +337,24 @@ def transcribe_with_timestamps(
         [str(audio_path)],
         batch_size=1,
         return_hypotheses=True,
-        timestamps=True,
         language_id=language,
     )
+    if isinstance(hypotheses, tuple):
+        hypotheses = hypotheses[0]
     if not hypotheses:
         raise RuntimeError("NeMo returned no hypothesis.")
 
     hypothesis = hypotheses[0]
     timestamp_data = getattr(hypothesis, "timestamp", None)
-    if timestamp_data is None:
+    if not isinstance(timestamp_data, dict):
+        timestamp_data = getattr(hypothesis, "timestep", None)
+    if not isinstance(timestamp_data, dict):
         raise RuntimeError(
-            "NeMo returned no timestamps. Verify your AI4Bharat NeMo version "
-            "supports timestamps=True for this model."
+            "NeMo returned no word timestamps. CTC timestamp decoding did not run."
         )
 
-    words = [
-        {
-            "word": str(item["word"]),
-            "start": float(item["start"]),
-            "end": float(item["end"]),
-        }
-        for item in timestamp_data.get("word", [])
-    ]
+    stride = _frame_stride_seconds(model)
+    words = [_word_timestamp(item, stride) for item in timestamp_data.get("word", [])]
     if not words:
         raise RuntimeError("NeMo returned an empty word-timestamp list.")
 
